@@ -21,14 +21,10 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install requests pyinstaller
-        pip install git+https://github.com/odwdinc/Python-SimConnect.git
+        pip install pyuipc || echo "pyuipc not available, continuing"
+        pip install git+https://github.com/odwdinc/Python-SimConnect.git || echo "SimConnect not available, continuing"
 
     - name: Build executable
-      run: |
-        pyinstaller --onefile --windowed --name "LibroDeVuelo-Tracker" --icon=src/icon.ico src/tracker.py
-      continue-on-error: true
-
-    - name: Build executable (no icon)
       run: |
         pyinstaller --onefile --windowed --name "LibroDeVuelo-Tracker" src/tracker.py
 
@@ -37,23 +33,3 @@ jobs:
       with:
         name: LibroDeVuelo-Tracker-Windows
         path: dist/LibroDeVuelo-Tracker.exe
-
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      if: github.ref == 'refs/heads/main'
-      with:
-        tag_name: v1.0.${{ github.run_number }}
-        name: Libro de Vuelo Tracker v1.0.${{ github.run_number }}
-        body: |
-          ## Libro de Vuelo - Tracker Automatico
-
-          ### Instalacion
-          1. Descarga `LibroDeVuelo-Tracker.exe`
-          2. Ejecutalo (puede pedir permiso de Windows - clic en "Mas informacion" > "Ejecutar de todas formas")
-          3. Inicia sesion con tu cuenta de Libro de Vuelo
-          4. Abre MSFS 2020 y clic en "Conectar a MSFS"
-          5. Vola - tus vuelos se guardan automaticamente!
-
-        files: dist/LibroDeVuelo-Tracker.exe
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
