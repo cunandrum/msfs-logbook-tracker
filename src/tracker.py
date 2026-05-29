@@ -78,6 +78,7 @@ class MSFSTracker:
         self.on_ground = True
         self.sm = None
         self.aq = None
+        self.current_aircraft = ""
 
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -288,6 +289,14 @@ class MSFSTracker:
             except:
                 airport = None
 
+            # Try to get aircraft name
+            try:
+                aircraft_title = self.aq.get("TITLE")
+                if aircraft_title:
+                    self.current_aircraft = str(aircraft_title).strip()
+            except:
+                pass
+
             # Update UI
             alt_str = f"{int(altitude):,} ft"
             vs_str = f"{vs_fpm:+d} fpm"
@@ -301,7 +310,7 @@ class MSFSTracker:
                 self.departure_airport = airport or "----"
                 self.root.after(0, lambda d=self.departure_airport: self.dep_label.config(text=d))
                 self.root.after(0, lambda: self.dest_label.config(text="----"))
-                self.root.after(0, lambda: self.log(f"Despegue detectado desde {self.departure_airport}"))
+                self.root.after(0, lambda: self.log(f"Despegue detectado desde {self.departure_airport} — {self.current_aircraft or 'avion desconocido'}"))
 
             # Detect landing
             if not self.on_ground and on_ground and self.in_flight:
@@ -347,7 +356,7 @@ class MSFSTracker:
         flight = {
             "date": today,
             "airline": "",
-            "aircraft": "",
+            "aircraft": self.current_aircraft,
             "departure": self.departure_airport,
             "destination": dest,
             "duration": duration,
