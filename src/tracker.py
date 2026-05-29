@@ -1,44 +1,17 @@
 import tkinter as tk
-from tkinter import ttk
 import threading
 import time
 import json
 import requests
-from datetime import datetime, timezone
+import math
+import re
 import os
-import struct
-
-# Try FSUIPC first, then SimConnect
-FSUIPC_AVAILABLE = False
-SIMCONNECT_AVAILABLE = False
-
-try:
-    import pyuipc
-    FSUIPC_AVAILABLE = True
-except ImportError:
-    pass
-
-if not FSUIPC_AVAILABLE:
-    try:
-        from SimConnect import SimConnect, AircraftRequests
-        SIMCONNECT_AVAILABLE = True
-    except ImportError:
-        pass
+import glob
+from datetime import datetime, timezone
 
 SUPABASE_URL = "https://xsvnxexbkrpnwfxhfoho.supabase.co"
 SUPABASE_KEY = "sb_publishable_5VQjgvOKq1k_wgpLegG1hA_AGj15Bq_"
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".msfs_logbook_config.json")
-
-# FSUIPC offsets
-OFFSET_ON_GROUND    = 0x0366  # 2 bytes - on ground flag
-OFFSET_ALTITUDE     = 0x0574  # 8 bytes - altitude in meters * 65536
-OFFSET_VS           = 0x02C8  # 4 bytes - vertical speed ft/min * 256
-OFFSET_ACFT_TITLE   = 0x3D00  # 256 bytes - aircraft title string
-OFFSET_ICAO         = 0x0BB8  # 4 bytes - nearest airport ICAO (not reliable, use GPS)
-OFFSET_LAT          = 0x0560  # 8 bytes - latitude
-OFFSET_LON          = 0x0568  # 8 bytes - longitude
-OFFSET_AIRPORT      = 0x0B4C  # Not standard, use GPS approach airport
-OFFSET_GPS_AIRPORT  = 0x6FB0  # 8 bytes - GPS destination airport (ICAO)
 
 def load_config():
     try:
@@ -56,8 +29,7 @@ def supabase_login(email, password):
         r = requests.post(
             f"{SUPABASE_URL}/auth/v1/token?grant_type=password",
             headers={"apikey": SUPABASE_KEY, "Content-Type": "application/json"},
-            json={"email": email, "password": password},
-            timeout=10
+            json={"email": email, "password": password}, timeout=10
         )
         if r.status_code == 200:
             return r.json()
@@ -75,26 +47,95 @@ def supabase_insert_flight(access_token, user_id, flight):
                 "Content-Type": "application/json",
                 "Prefer": "return=representation"
             },
-            json={**flight, "pilot_id": user_id},
-            timeout=10
+            json={**flight, "pilot_id": user_id}, timeout=10
         )
         return r.status_code in (200, 201)
     except:
         return False
 
-def read_fsuipc_string(offset, length=64):
+def find_msfs_report():
+    """Find the MSFS AsoboReport file across common locations"""
+    patterns = [
+        os.path.expandvars(r"%LOCALAPPDATA%\Packages\Microsoft.FlightSimulator_8wekyb3d8bbwe\LocalState\AsoboReport-RunningSession.txt"),
+        os.path.expandvars(r"%APPDATA%\Microsoft Flight Simulator\AsoboReport-RunningSession.txt"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Microsoft Flight Simulator\AsoboReport-RunningSession.txt"),
+    ]
+    # Also search in common Steam location
+    steam_path = r"C:\Program Files (x86)\Steam\userdata"
+    if os.path.exists(steam_path):
+        for root, dirs, files in os.walk(steam_path):
+            for f in files:
+                if f == "AsoboReport-RunningSession.txt":
+                    patterns.append(os.path.join(root, f))
+
+    for p in patterns:
+        if os.path.exists(p):
+            return p
+    return None
+
+def parse_report(filepath):
+    """Parse the MSFS report file and extract key values"""
     try:
-        data = pyuipc.read([(offset, pyuipc.TYPE_STRING.replace("s", f"{length}s"))])
-        return data[0].decode("latin-1").rstrip("\x00").strip()
-    except:
-        return ""
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        data = {}
+
+        # Extract key values using regex
+        def get_val(key, content):
+            m = re.search(rf'^{key}=(.+)$', content, re.MULTILINE)
+            return m.group(1).strip().strip('"') if m else None
+
+        data["aircraft"] = get_val("UserContainerTitle", content)
+        data["game_mode"] = get_val("GameMode", content)
+        data["is_on_ground"] = get_val("IsOnGround", content)
+
+        lat = get_val("Latitude", content)
+        lon = get_val("Longitude", content)
+        alt = get_val("Altitude", content)
+
+        data["lat"] = float(lat) if lat else None
+        data["lon"] = float(lon) if lon else None
+        data["altitude"] = float(alt) if alt else None
+
+        # Departure airport
+        dep_match = re.search(r'Departure=\["([^"]+)",([^,]+),([^\]]+)\]', content)
+        if dep_match:
+            data["departure_name"] = dep_match.group(1)
+            data["departure_lat"] = float(dep_match.group(2))
+            data["departure_lon"] = float(dep_match.group(3))
+
+        # Arrival airport
+        arr_match = re.search(r'Arrival=\["([^"]+)",([^,]+),([^\]]+)\]', content)
+        if arr_match:
+            data["arrival_name"] = arr_match.group(1)
+
+        return data
+    except Exception as e:
+        return None
+
+def coords_to_icao_guess(lat, lon, name):
+    """Try to get ICAO from departure name - rough mapping"""
+    # MSFS departure names sometimes contain ICAO
+    if name and len(name) == 4 and name.isupper():
+        return name
+    return name[:10] if name else "----"
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Calculate distance in meters between two GPS points"""
+    R = 6371000
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlambda/2)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 class MSFSTracker:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Libro de Vuelo - Tracker")
-        self.root.geometry("480x680")
-        self.root.minsize(440, 580)
+        self.root.geometry("480x700")
+        self.root.minsize(440, 600)
         self.root.resizable(True, True)
         self.root.configure(bg="#0d0f14")
 
@@ -102,14 +143,14 @@ class MSFSTracker:
         self.access_token = self.config.get("access_token")
         self.user_id = self.config.get("user_id")
         self.running = False
-        self.connected_sim = False
+        self.report_path = None
         self.in_flight = False
         self.flight_start_time = None
         self.departure_airport = "----"
         self.current_aircraft = ""
         self.on_ground_prev = True
-        self.sm = None
-        self.aq = None
+        self.prev_alt = 0
+        self.vs_samples = []
 
         self.build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -133,8 +174,8 @@ class MSFSTracker:
         self.clear_frame(self.frame_login)
 
         tk.Label(self.frame_login, text="MSFS 2020", font=("Courier", 10), fg="#666666", bg="#0d0f14").pack(pady=(20,0))
-        tk.Label(self.frame_login, text="Libro de Vuelo", font=("Georgia", 22, "bold"), fg="#e8d5a3", bg="#0d0f14").pack(pady=(0,30))
-        tk.Label(self.frame_login, text="Tracker de vuelos automatico", font=("Courier", 11), fg="#888888", bg="#0d0f14").pack(pady=(0,30))
+        tk.Label(self.frame_login, text="Libro de Vuelo", font=("Georgia", 22, "bold"), fg="#e8d5a3", bg="#0d0f14").pack(pady=(0,8))
+        tk.Label(self.frame_login, text="Tracker automatico — sin instalacion", font=("Courier", 10), fg="#888888", bg="#0d0f14").pack(pady=(0,30))
 
         tk.Label(self.frame_login, text="EMAIL", font=("Courier", 9), fg="#888888", bg="#0d0f14", anchor="w").pack(fill="x")
         self.email_var = tk.StringVar(value=self.config.get("email",""))
@@ -180,12 +221,7 @@ class MSFSTracker:
         tk.Label(self.frame_tracker, text="Libro de Vuelo — Tracker", font=("Georgia", 16, "bold"),
                  fg="#e8d5a3", bg="#0d0f14").pack(pady=(10,0))
         tk.Label(self.frame_tracker, text=self.config.get("email",""), font=("Courier", 9),
-                 fg="#666666", bg="#0d0f14").pack(pady=(0,12))
-
-        # Mode indicator
-        mode = "FSUIPC7" if FSUIPC_AVAILABLE else "SimConnect" if SIMCONNECT_AVAILABLE else "Sin libreria"
-        tk.Label(self.frame_tracker, text=f"Modo: {mode}", font=("Courier", 8),
-                 fg="#444", bg="#0d0f14").pack()
+                 fg="#666666", bg="#0d0f14").pack(pady=(0,4))
 
         # Status
         sf = tk.Frame(self.frame_tracker, bg="#1a1d24", pady=10, padx=14)
@@ -198,8 +234,6 @@ class MSFSTracker:
         ff = tk.Frame(self.frame_tracker, bg="#1a1d24", pady=14, padx=14)
         ff.pack(fill="x", pady=(0,8))
         tk.Label(ff, text="VUELO EN CURSO", font=("Courier", 8), fg="#888888", bg="#1a1d24").pack(anchor="w")
-
-        # Aircraft label
         self.aircraft_label = tk.Label(ff, text="", font=("Courier", 9), fg="#888888", bg="#1a1d24")
         self.aircraft_label.pack(anchor="w", pady=(2,6))
 
@@ -269,152 +303,83 @@ class MSFSTracker:
 
     def tracker_loop(self):
         while self.running:
-            if not self.connected_sim:
-                try:
-                    if FSUIPC_AVAILABLE:
-                        pyuipc.open(pyuipc.SIM_ANY)
-                        self.connected_sim = True
-                        self.root.after(0, lambda: self.sim_status_label.config(text="⬤  Conectado via FSUIPC7", fg="#00ffaa"))
-                        self.root.after(0, lambda: self.log("Conectado a MSFS via FSUIPC7!"))
-                    elif SIMCONNECT_AVAILABLE:
-                        self.sm = SimConnect()
-                        self.aq = AircraftRequests(self.sm, _time=2000)
-                        self.connected_sim = True
-                        self.root.after(0, lambda: self.sim_status_label.config(text="⬤  Conectado via SimConnect", fg="#00ffaa"))
-                        self.root.after(0, lambda: self.log("Conectado a MSFS via SimConnect!"))
-                    else:
-                        self.root.after(0, lambda: self.sim_status_label.config(text="⬤  Sin libreria SimConnect/FSUIPC", fg="#ff4444"))
-                        self.running = False
-                        return
-                except Exception as e:
-                    self.root.after(0, lambda: self.sim_status_label.config(text="⬤  MSFS no encontrado...", fg="#ff8800"))
+            # Find report file
+            if not self.report_path:
+                path = find_msfs_report()
+                if path:
+                    self.report_path = path
+                    self.root.after(0, lambda: self.sim_status_label.config(
+                        text="⬤  Conectado a MSFS", fg="#00ffaa"))
+                    self.root.after(0, lambda: self.log(f"Archivo MSFS encontrado!"))
+                else:
+                    self.root.after(0, lambda: self.sim_status_label.config(
+                        text="⬤  MSFS no encontrado...", fg="#ff8800"))
                     time.sleep(5)
                     continue
 
             try:
-                self.read_sim_data()
-                time.sleep(1)
+                data = parse_report(self.report_path)
+                if data:
+                    self.process_data(data)
+                time.sleep(2)
             except Exception as e:
-                self.connected_sim = False
-                if FSUIPC_AVAILABLE:
-                    try: pyuipc.close()
-                    except: pass
-                self.root.after(0, lambda: self.sim_status_label.config(text="⬤  Conexion perdida", fg="#ff4444"))
-                self.root.after(0, lambda: self.log("Conexion perdida. Reconectando..."))
+                self.root.after(0, lambda: self.log(f"Error: {str(e)[:50]}"))
                 time.sleep(3)
 
-    def read_sim_data(self):
-        if FSUIPC_AVAILABLE:
-            self.read_fsuipc()
-        elif SIMCONNECT_AVAILABLE:
-            self.read_simconnect()
+    def process_data(self, data):
+        game_mode = data.get("game_mode", "")
+        if "INGAME" not in game_mode and "FLIGHT" not in game_mode:
+            return
 
-    def read_fsuipc(self):
-        try:
-            results = pyuipc.read([
-                (0x0366, "H"),   # on ground (0=air, 1=ground)
-                (0x3324, "d"),   # altitude feet * 65536
-                (0x02C8, "d"),   # VS ft/min * 256
-                (0x3D00, "128s"), # aircraft title
-            ])
+        altitude_m = data.get("altitude", 0) or 0
+        altitude_ft = altitude_m * 3.28084
+        on_ground = data.get("is_on_ground", "true").lower() == "true"
+        aircraft = data.get("aircraft", "") or ""
 
-            on_ground = bool(results[0])
-            altitude = results[1] / 65536.0
-            vs_fpm = int(results[2] / 256.0)
-            acft_raw = results[3]
-            aircraft = acft_raw.decode("latin-1").rstrip("\x00").strip() if acft_raw else ""
+        # Calculate VS from altitude change
+        vs_fpm = 0
+        if self.prev_alt > 0:
+            alt_change = altitude_ft - self.prev_alt
+            vs_fpm = int(alt_change * 30)  # per 2 seconds * 30 = per minute
+            self.vs_samples.append(vs_fpm)
+            if len(self.vs_samples) > 3:
+                self.vs_samples.pop(0)
+            vs_fpm = int(sum(self.vs_samples) / len(self.vs_samples))
+        self.prev_alt = altitude_ft
 
-            if aircraft:
-                self.current_aircraft = aircraft
-                self.root.after(0, lambda a=aircraft[:40]: self.aircraft_label.config(text=a))
+        if aircraft and aircraft != self.current_aircraft:
+            self.current_aircraft = aircraft
+            self.root.after(0, lambda a=aircraft[:45]: self.aircraft_label.config(text=a))
 
-            alt_str = f"{int(altitude):,} ft"
-            vs_str = f"{vs_fpm:+d} fpm"
-            self.root.after(0, lambda a=alt_str: self.alt_label.config(text=a))
-            self.root.after(0, lambda v=vs_str: self.vs_label.config(text=v))
+        alt_str = f"{int(altitude_ft):,} ft"
+        vs_str = f"{vs_fpm:+d} fpm"
+        self.root.after(0, lambda a=alt_str: self.alt_label.config(text=a))
+        self.root.after(0, lambda v=vs_str: self.vs_label.config(text=v))
 
-            # Takeoff detection
-            if self.on_ground_prev and not on_ground and altitude > 50:
-                self.in_flight = True
-                self.flight_start_time = time.time()
-                # Get nearest airport as departure
-                try:
-                    icao_data = pyuipc.read([(0x0658, "4s")])
-                    icao = icao_data[0].decode("latin-1").rstrip("\x00").strip()
-                    self.departure_airport = icao if icao else "----"
-                except:
-                    self.departure_airport = "SADP"  # fallback
+        # Takeoff detection
+        if self.on_ground_prev and not on_ground and altitude_ft > 30:
+            self.in_flight = True
+            self.flight_start_time = time.time()
+            dep_name = data.get("departure_name", "----")
+            self.departure_airport = dep_name[:10] if dep_name else "----"
+            self.root.after(0, lambda d=self.departure_airport: self.dep_label.config(text=d))
+            self.root.after(0, lambda: self.dest_label.config(text="----"))
+            self.root.after(0, lambda: self.log(f"Despegue desde {self.departure_airport} — {self.current_aircraft[:25]}"))
 
-                self.root.after(0, lambda d=self.departure_airport: self.dep_label.config(text=d))
-                self.root.after(0, lambda: self.dest_label.config(text="----"))
-                self.root.after(0, lambda: self.log(f"Despegue desde {self.departure_airport} — {self.current_aircraft[:30]}"))
+        # Landing detection
+        if not self.on_ground_prev and on_ground and self.in_flight:
+            self.in_flight = False
+            td_fpm = vs_fpm
+            duration = int((time.time() - self.flight_start_time) / 60) if self.flight_start_time else 0
+            landing = data.get("arrival_name") or data.get("departure_name") or "----"
+            landing = landing[:10] if landing else "----"
 
-            # Landing detection
-            if not self.on_ground_prev and on_ground and self.in_flight and altitude < 100:
-                self.in_flight = False
-                td_fpm = vs_fpm
+            self.root.after(0, lambda d=landing: self.dest_label.config(text=d))
+            self.root.after(0, lambda t=td_fpm: self.update_touchdown(t))
+            self.root.after(0, lambda la=landing, t=td_fpm: self.log(f"Aterrizaje en {la} — {t} fpm"))
+            threading.Thread(target=self.save_flight, args=(duration, td_fpm, landing), daemon=True).start()
 
-                # Get landing airport
-                try:
-                    icao_data = pyuipc.read([(0x0658, "4s")])
-                    icao = icao_data[0].decode("latin-1").rstrip("\x00").strip()
-                    landing_airport = icao if icao else "----"
-                except:
-                    landing_airport = "----"
-
-                duration = int((time.time() - self.flight_start_time) / 60) if self.flight_start_time else 0
-
-                self.root.after(0, lambda d=landing_airport: self.dest_label.config(text=d))
-                self.root.after(0, lambda t=td_fpm: self.update_touchdown(t))
-                self.root.after(0, lambda la=landing_airport, t=td_fpm: self.log(f"Aterrizaje en {la} — {t} fpm"))
-
-                threading.Thread(target=self.save_flight, args=(duration, td_fpm, landing_airport), daemon=True).start()
-
-            self.on_ground_prev = on_ground
-
-        except Exception as e:
-            raise e
-
-    def read_simconnect(self):
-        try:
-            on_ground = bool(self.aq.get("SIM_ON_GROUND"))
-            altitude = self.aq.get("PLANE_ALTITUDE") or 0
-            vs = self.aq.get("VERTICAL_SPEED") or 0
-            vs_fpm = int(vs * 196.85)
-
-            try:
-                aircraft = str(self.aq.get("TITLE") or "").strip()
-                if aircraft:
-                    self.current_aircraft = aircraft
-                    self.root.after(0, lambda a=aircraft[:40]: self.aircraft_label.config(text=a))
-            except:
-                pass
-
-            alt_str = f"{int(altitude):,} ft"
-            vs_str = f"{vs_fpm:+d} fpm"
-            self.root.after(0, lambda a=alt_str: self.alt_label.config(text=a))
-            self.root.after(0, lambda v=vs_str: self.vs_label.config(text=v))
-
-            if self.on_ground_prev and not on_ground and altitude > 100:
-                self.in_flight = True
-                self.flight_start_time = time.time()
-                self.departure_airport = "----"
-                self.root.after(0, lambda: self.dep_label.config(text="----"))
-                self.root.after(0, lambda: self.dest_label.config(text="----"))
-                self.root.after(0, lambda: self.log(f"Despegue detectado — {self.current_aircraft[:30]}"))
-
-            if not self.on_ground_prev and on_ground and self.in_flight:
-                self.in_flight = False
-                td_fpm = vs_fpm
-                duration = int((time.time() - self.flight_start_time) / 60) if self.flight_start_time else 0
-
-                self.root.after(0, lambda t=td_fpm: self.update_touchdown(t))
-                self.root.after(0, lambda: self.log(f"Aterrizaje — {td_fpm} fpm"))
-                threading.Thread(target=self.save_flight, args=(duration, td_fpm, "----"), daemon=True).start()
-
-            self.on_ground_prev = on_ground
-        except Exception as e:
-            raise e
+        self.on_ground_prev = on_ground
 
     def update_touchdown(self, fpm):
         abs_fpm = abs(fpm)
@@ -429,13 +394,9 @@ class MSFSTracker:
     def save_flight(self, duration, td_fpm, dest):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         flight = {
-            "date": today,
-            "airline": "",
-            "aircraft": self.current_aircraft,
-            "departure": self.departure_airport,
-            "destination": dest,
-            "duration": duration,
-            "touchdown": str(td_fpm),
+            "date": today, "airline": "", "aircraft": self.current_aircraft,
+            "departure": self.departure_airport, "destination": dest,
+            "duration": duration, "touchdown": str(td_fpm),
             "notes": "Registrado automaticamente por MSFS Tracker",
         }
         success = supabase_insert_flight(self.access_token, self.user_id, flight)
@@ -451,8 +412,7 @@ class MSFSTracker:
                 h = elapsed // 3600
                 m = (elapsed % 3600) // 60
                 s = elapsed % 60
-                time_str = f"{h:02d}:{m:02d}:{s:02d}"
-                self.root.after(0, lambda t=time_str: self.time_label.config(text=t))
+                self.root.after(0, lambda t=f"{h:02d}:{m:02d}:{s:02d}": self.time_label.config(text=t))
             time.sleep(1)
 
     def logout(self):
@@ -465,9 +425,6 @@ class MSFSTracker:
 
     def on_close(self):
         self.running = False
-        if FSUIPC_AVAILABLE and self.connected_sim:
-            try: pyuipc.close()
-            except: pass
         self.root.destroy()
 
     def run(self):
