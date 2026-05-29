@@ -60,8 +60,9 @@ class MSFSTracker:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Libro de Vuelo - Tracker")
-        self.root.geometry("480x600")
-        self.root.resizable(False, False)
+        self.root.geometry("480x680")
+        self.root.minsize(400, 600)
+        self.root.resizable(True, True)
         self.root.configure(bg="#0d0f14")
 
         # State
