@@ -199,7 +199,7 @@ class ACARS:
         self.root = tk.Tk()
         self.root.title(f"Libro de Vuelo — ACARS v{VERSION}")
         self.root.geometry("460x620")
-        self.root.resizable(False, False)
+        self.root.resizable(True, True)
         self.root.configure(bg="#0d0f14")
 
         self.cfg     = load_config()
