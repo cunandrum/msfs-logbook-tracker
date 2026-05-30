@@ -10,26 +10,27 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install requests pyinstaller
-        pip install pyuipc || echo "pyuipc not available, continuing"
-        pip install git+https://github.com/odwdinc/Python-SimConnect.git || echo "SimConnect not available, continuing"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+          pip install SimConnect
+          pip install pyinstaller
 
-    - name: Build executable
-      run: |
-        pyinstaller --onefile --windowed --name "LibroDeVuelo-Tracker" src/tracker.py
+      - name: Build executable
+        run: |
+          pyinstaller --onefile --windowed --name "LibroDeVuelo-ACARS" src/tracker.py
 
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: LibroDeVuelo-Tracker-Windows
-        path: dist/LibroDeVuelo-Tracker.exe
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LibroDeVuelo-ACARS-Windows
+          path: dist/LibroDeVuelo-ACARS.exe
+
