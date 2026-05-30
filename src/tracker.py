@@ -326,7 +326,6 @@ class ACARS:
         tk.Entry(row, textvariable=self.v_sbuser, font=("Courier", 12),
                  bg="#0d0f14", fg="#e8d5a3", insertbackground="#e8d5a3",
                  relief="flat", bd=6, width=18,
-                 placeholder="usuario SimBrief"
                  ).pack(side="left", ipady=5)
 
         tk.Button(row, text="CARGAR PLAN", font=("Courier", 9, "bold"),
